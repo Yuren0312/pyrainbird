@@ -89,26 +89,8 @@ async def stream_cloud(
     """Connect to the cloud real-time updates WebSocket stream."""
     try:
         token_provider = create_cloud_token_provider(session, config_file)
-        client = AsyncRainbirdCloudClient(session, token_provider)
-        satellites = await client.get_satellites()
-
-        # Find the device_uuid for the given satellite_id
-        device_uuid = None
-        for sat in satellites:
-            if sat.id == satellite_id:
-                device_uuid = sat.device_uuid
-                break
-
-        if not device_uuid:
-            print(f"Error: Satellite ID {satellite_id} not found in user account.")
-            return
-
-        print(
-            f"Connecting to real-time updates stream for satellite {satellite_id} (UUID: {device_uuid})..."
-        )
-        stream = AsyncRainbirdCloudStream(
-            token_provider, satellite_id, device_uuid, session
-        )
+        print(f"Connecting to real-time updates stream for satellite {satellite_id}...")
+        stream = AsyncRainbirdCloudStream(token_provider, satellite_id, session=session)
 
         async for event in stream.listen():
             prefix = f"[{event.updated_at.isoformat()}] Satellite {event.satellite_id} ({event.device_uuid}) -"

@@ -87,6 +87,13 @@ SatelliteListResponse:
       type: integer
     ioTGatewayUUID:
       type: string
+      description: IoT gateway identifier (not the AppSync DeviceStateTable partition key).
+    asset:
+      type: object
+      properties:
+        uuid:
+          type: string
+          description: Asset UUID used as the partition key (PK) for AppSync DeviceStateTable subscriptions.
 
 SatelliteResponse:
   type: object
@@ -103,8 +110,18 @@ SatelliteResponse:
       format: int64
     deviceUUID:
       type: string
+    ioTGatewayUUID:
+      type: string
+      description: IoT gateway identifier (not the AppSync DeviceStateTable partition key).
+    asset:
+      type: object
+      properties:
+        uuid:
+          type: string
+          description: Asset UUID used as the partition key (PK) for AppSync DeviceStateTable subscriptions.
     macAddress:
       type: string
+      description: Controller MAC address.
     firmwareVersion:
       type: string
     serialNumber:

@@ -982,6 +982,14 @@ class CloudSatellite(DataClassDictMixin):
     satellite_enabled: bool = field(metadata=field_options(alias="satelliteEnabled"))
     description: str | None = None
 
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[Any, Any]) -> dict[Any, Any]:
+        """Prefer asset.uuid when present on the satellite record."""
+        asset = d.get("asset")
+        if isinstance(asset, dict) and (asset_uuid := asset.get("uuid")):
+            return {**d, "deviceUUID": asset_uuid}
+        return d
+
 
 @dataclass
 class FirmwareUpdateStatus(DataClassDictMixin):

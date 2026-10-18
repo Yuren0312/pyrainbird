@@ -24,7 +24,8 @@ from pyrainbird.cloud import (
     RssiStateEvent,
     StationStateEvent,
 )
-from pyrainbird.exceptions import RainbirdAuthException
+from pyrainbird.data import CloudSatellite
+from pyrainbird.exceptions import RainbirdApiException, RainbirdAuthException
 
 
 class MockTokenProvider(RainbirdTokenProvider):
@@ -832,3 +833,112 @@ async def test_stream_connection_error_retry_backoff() -> None:
     assert token_provider.calls == 2
     assert "refreshed_token" in token_provider.token
     mock_sleep.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_resolves_asset_uuid_from_satellite(
+    mock_ws_app: aiohttp.web.Application, aiohttp_client: Generator
+) -> None:
+    """Test that stream resolves asset.uuid (not ioTGatewayUUID) when device_uuid is omitted."""
+    asset_uuid = "9a95c404-0000-b508-90c7-000000000000"
+    iot_gateway_uuid = "4c95c404-0000-7e21-903d-000000000000"
+
+    async def get_satellite_handler(
+        request: aiohttp.web.Request,
+    ) -> aiohttp.web.Response:
+        assert request.query.get("satelliteId") == "527302"
+        return aiohttp.web.json_response(
+            {
+                "id": 527302,
+                "ioTGatewayUUID": iot_gateway_uuid,
+                "asset": {"uuid": asset_uuid},
+            }
+        )
+
+    mock_ws_app.router.add_get(
+        "/coreapi/api/Satellite/GetSatellite", get_satellite_handler
+    )
+    client: TestClient = await aiohttp_client(mock_ws_app)
+    token_provider = MockTokenProvider("test_token")
+
+    with (
+        mock.patch(
+            "pyrainbird.cloud.stream.WS_ENDPOINT",
+            f"ws://{client.host}:{client.port}/graphql",
+        ),
+        mock.patch(
+            "pyrainbird.cloud.client.API_BASE",
+            str(client.make_url("/coreapi/api")),
+        ),
+    ):
+        stream = AsyncRainbirdCloudStream(token_provider, 527302, client.session)
+        events = []
+        async for event in stream.listen():
+            events.append(event)
+            if len(events) >= 2:
+                break
+
+    assert len(events) == 2
+    start_msgs = [
+        m for m in mock_ws_app["messages_received"] if m.get("type") == "start"
+    ]
+    assert len(start_msgs) == 1
+    sub_data = json.loads(start_msgs[0]["payload"]["data"])
+    assert sub_data["variables"] == {"PK": asset_uuid}
+
+
+@pytest.mark.asyncio
+async def test_stream_resolve_device_uuid_fallback_and_missing(
+    aiohttp_client: Generator,
+) -> None:
+    """Test fallback to deviceUUID and error when neither asset.uuid nor deviceUUID exists."""
+    app = aiohttp.web.Application()
+    payload: dict[str, Any] = {
+        "id": 527302,
+        "deviceUUID": "7b1ad1ef-91df-4e50-9004-269c139c681c",
+    }
+
+    async def get_satellite_handler(
+        request: aiohttp.web.Request,
+    ) -> aiohttp.web.Response:
+        return aiohttp.web.json_response(payload)
+
+    app.router.add_get("/coreapi/api/Satellite/GetSatellite", get_satellite_handler)
+    client: TestClient = await aiohttp_client(app)
+    token_provider = MockTokenProvider("test_token")
+
+    with mock.patch(
+        "pyrainbird.cloud.client.API_BASE",
+        str(client.make_url("/coreapi/api")),
+    ):
+        stream = AsyncRainbirdCloudStream(
+            token_provider, 527302, session=client.session
+        )
+        resolved = await stream._resolve_device_uuid()
+        assert resolved == "7b1ad1ef-91df-4e50-9004-269c139c681c"
+
+        payload.clear()
+        payload["id"] = 527302
+        stream_missing = AsyncRainbirdCloudStream(
+            token_provider, 527302, session=client.session
+        )
+        with pytest.raises(RainbirdApiException, match="Could not resolve device UUID"):
+            await stream_missing._resolve_device_uuid()
+
+
+def test_cloud_satellite_prefers_asset_uuid() -> None:
+    """Test that CloudSatellite prefers asset.uuid over deviceUUID when present."""
+    sat = CloudSatellite.from_dict(
+        {
+            "id": 527302,
+            "name": "Test Controller",
+            "type": 69,
+            "siteId": 657314,
+            "siteName": "Woodgreen",
+            "deviceUUID": "4c95c404-0000-7e21-903d-000000000000",
+            "asset": {"uuid": "9a95c404-0000-b508-90c7-000000000000"},
+            "stationCount": 4,
+            "satelliteEnabled": True,
+        }
+    )
+    assert sat.device_uuid == "9a95c404-0000-b508-90c7-000000000000"

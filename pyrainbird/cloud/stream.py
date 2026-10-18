@@ -27,7 +27,7 @@ Protocol Overview:
          TimeStamp
        }
      }
-   - `PK` represents the Partition Key (the satellite's `device_uuid`).
+   - `PK` represents the Partition Key (the satellite's `asset.uuid` or `deviceUUID`, not `ioTGatewayUUID`).
    - `SK` represents the Sort Key (indicating the type of status/update).
 
 4. Message Handling:
@@ -47,8 +47,13 @@ from typing import Any
 import aiohttp
 
 from pyrainbird.async_client import RainbirdTokenProvider
-from pyrainbird.exceptions import RainbirdAuthException
+from pyrainbird.exceptions import (
+    RainbirdApiException,
+    RainbirdAuthException,
+    RainbirdConnectionError,
+)
 
+from .client import AsyncRainbirdCloudClient
 from .models import (
     SUBSCRIBE_DEVICE_STATE_QUERY,
     CloudStreamEvent,
@@ -91,15 +96,49 @@ class AsyncRainbirdCloudStream:
         self,
         token_provider: RainbirdTokenProvider,
         satellite_id: int,
-        device_uuid: str,
-        session: aiohttp.ClientSession,
+        device_uuid: str | aiohttp.ClientSession | None = None,
+        session: aiohttp.ClientSession | None = None,
     ) -> None:
-        """Initialize the real-time cloud stream manager."""
+        """Initialize the real-time cloud stream manager.
+
+        If `device_uuid` is omitted, the subscription partition key (`PK`) is
+        resolved automatically from `Satellite/GetSatellite` (`asset.uuid`,
+        falling back to `deviceUUID`).
+        """
+        if (
+            session is None
+            and device_uuid is not None
+            and not isinstance(device_uuid, str)
+        ):
+            session = device_uuid
+            device_uuid = None
         self._token_provider = token_provider
         self._satellite_id = satellite_id
-        self._device_uuid = device_uuid
-        self._session = session
+        self._device_uuid: str | None = (
+            device_uuid if isinstance(device_uuid, str) else None
+        )
+        self._session = session  # type: ignore[assignment]
         self._force_refresh_token = False
+
+    async def _resolve_device_uuid(self) -> str:
+        """Resolve the subscription PK from Satellite/GetSatellite."""
+        if self._device_uuid:
+            return self._device_uuid
+
+        client = AsyncRainbirdCloudClient(self._session, self._token_provider)
+        satellite = await client.get_satellite(self._satellite_id)
+        if isinstance(satellite, dict):
+            asset = satellite.get("asset")
+            if isinstance(asset, dict) and (asset_uuid := asset.get("uuid")):
+                self._device_uuid = str(asset_uuid)
+                return self._device_uuid
+            if device_uuid := satellite.get("deviceUUID"):
+                self._device_uuid = str(device_uuid)
+                return self._device_uuid
+
+        raise RainbirdApiException(
+            f"Could not resolve device UUID (asset.uuid) for satellite {self._satellite_id}"
+        )
 
     def _get_connection_url(self, token: str) -> str:
         """Construct the authenticated AppSync WebSocket handshake URL."""
@@ -239,6 +278,7 @@ class AsyncRainbirdCloudStream:
                         "Token acquisition failed"
                     ) from token_err
 
+                device_uuid = await self._resolve_device_uuid()
                 url = self._get_connection_url(token)
                 _LOGGER.debug("Connecting to AppSync WebSocket endpoint...")
 
@@ -278,7 +318,7 @@ class AsyncRainbirdCloudStream:
                                 # Subscribe once connection is acknowledged
                                 query_data = SubscriptionQueryData(
                                     query=SUBSCRIBE_DEVICE_STATE_QUERY,
-                                    variables={"PK": self._device_uuid},
+                                    variables={"PK": device_uuid},
                                 )
                                 extensions = SubscriptionExtensions(
                                     authorization=SubscriptionAuthorization(
@@ -379,6 +419,7 @@ class AsyncRainbirdCloudStream:
                 TimeoutError,
                 ConnectionError,
                 OSError,
+                RainbirdConnectionError,
             ) as e:
                 _LOGGER.warning(
                     "WebSocket error encountered: %s. Retrying in %ss...", e, backoff
